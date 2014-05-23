@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
-import pygame, pygame.locals, sys, mcons, math, os
+import pygame, pygame.locals, sys, mcons, math, os, bisect
 import ruleset as rs
+
+from ruleset import D6
 
 class MSurface(pygame.Surface):
    def __init__(self, (width, height), flags=0):
@@ -27,6 +29,263 @@ class MSurface(pygame.Surface):
          target_y = dy // 2
          
       return self.blit(source, (target_x, target_y), area, special_flags)
+
+class Theme:
+   def __init__( self ):
+      pygame.font.init()
+      
+      self.fontSize = 12
+      self.bgColor = pygame.Color( 0, 0, 0, 170 )
+      self.textColor = pygame.Color( 170, 170, 100 )
+      self.highlightColor = pygame.Color( 230, 230, 90 )
+      self.borderColor = pygame.Color( 150, 150, 40 )
+      self.darkBorderColor = pygame.Color( 20, 20, 20 )
+      
+      self.popFont = pygame.font.Font(os.path.join("fonts","segoeb.ttf"), 26)
+      self.popFontBig = pygame.font.Font(os.path.join("fonts","segoeb.ttf"), 30)
+      
+      self.font = pygame.font.Font(pygame.font.get_default_font(), self.fontSize)
+      self.boldFont = pygame.font.Font(pygame.font.get_default_font(), self.fontSize)
+      self.boldFont.set_bold(True)
+      #self.font = pygame.font.Font("DejaVuSans.ttf", self.fontSize)
+      #self.boldFont = pygame.font.Font("DejaVuSansBold.ttf", self.fontSize)
+      self.spacing = 2
+      
+class Interface:
+   def __init__( self, theme=Theme() ):
+      self.theme = theme
+      
+   def AttackTooltip( self, attack ):
+      headline = self.theme.boldFont.render( attack.name, True, self.theme.highlightColor )
+      descText = "+%i vs. %s, %s damage" % ( attack.fixedAtkBonus, attack.defense, "%s+%i" % ( attack.dmgDice.Str(), attack.fixedDmgBonus  ) )
+      desc = self.theme.font.render( descText, True, self.theme.textColor )
+      
+      w = max( headline.get_width(), desc.get_width() )
+      h = headline.get_height() + desc.get_height()
+      surf = pygame.Surface((w, h), pygame.SRCALPHA)
+      surf.fill( self.theme.bgColor )
+      surf.blit( headline, (0,0) )
+      surf.blit( desc, (0, headline.get_height() + self.theme.spacing) )
+      
+      return self.Box(surf)
+   
+   def DamagePopup( self, damage ):
+      back = self.theme.popFontBig.render( str(damage), True, self.theme.darkBorderColor )
+      front = self.theme.popFont.render( str(damage), True, self.theme.highlightColor )
+      
+      offset = ((back.get_width() - front.get_width())//2, (back.get_height() - front.get_height())//2)
+      back.blit( front, offset )
+      return back
+   
+   def InitGfx( self, rcLib ):
+      invGfx = ("InvMainhand", "InvOffhand", "InvHead", "InvNeck", "InvShoulder", "InvBack", "InvChest", "InvWrist", \
+                "InvHands", "InvWaist", "InvLegs", "InvFeet", "InvFinger", "InvFinger")
+      
+      w,h = 0,0
+      for slot in invGfx:
+         icon = rcLib.GetIcon(slot.lower())
+         if icon is None: print slot
+         h += icon.get_width()
+         if icon.get_height() > w: w = icon.get_height()
+         
+      w += 5*rcLib.GetIcon("invbag").get_width()
+         
+      invSurf = pygame.Surface((w,h))
+      y = 0
+      for slot in invGfx:
+         invSurf.blit( rcLib.GetIcon(slot.lower()), (0,y) )
+         for i in range(5):
+            invSurf.blit( rcLib.GetIcon("invbag"), ((i+1)*rcLib.GetIcon("invbag").get_width(), y))
+         y += rcLib.GetIcon(slot.lower()).get_width()
+         
+      self.inventorySurface = invSurf
+   
+   def CreatureTooltip(self, creature, showHp = False):
+      headline = self.theme.boldFont.render( creature.profile.name, True, self.theme.highlightColor )
+      hpPerc = max(0., 1. * creature.profile.curHp / creature.profile.maxHp)
+      
+      if showHp:
+         descText = "%i" % creature.profile.curHp
+      
+      else:
+         if hpPerc == 1.:
+            descText = "Uninjured"
+         elif 0.7 < hpPerc < 1.:
+            descText = "Barely injured"
+         elif 0.5 < hpPerc <= 0.7:
+            descText = "Injured"
+         elif 0.25 < hpPerc <= 0.5:
+            descText = "Badly injured"
+         elif 0. < hpPerc <= 0.25:
+            descText = "Near death"
+         else:
+            descText = "Dead"
+      
+      color = (min(255, (1.-hpPerc)*510), min(255, hpPerc*510), 0)
+      curHpText = self.theme.font.render( descText, True, color )
+      
+      if showHp:
+         maxHpText = self.theme.font.render(" / %i" % creature.profile.maxHp, True, self.theme.textColor)
+         w = max( headline.get_width(), curHpText.get_width()+maxHpText.get_width() )
+         h = headline.get_height() + max(curHpText.get_height(), maxHpText.get_height())
+      else:
+         w = max( headline.get_width(), curHpText.get_width() )
+         h = headline.get_height() + curHpText.get_height()
+         
+      surf = pygame.Surface((w, h), pygame.SRCALPHA)
+      #surf.fill( self.theme.bgColor )
+      surf.blit( headline, (0,0) )
+      surf.blit( curHpText, (0, headline.get_height() + self.theme.spacing) )
+      if showHp:
+         surf.blit( maxHpText, (curHpText.get_width(), max(curHpText.get_height(), maxHpText.get_height()) + self.theme.spacing))
+      
+      return Sprite.FromSurface(self.Box(surf))
+
+   def Box( self, surf, width=None, height=None ):
+      if width is None: width = surf.get_width() + 2*(self.theme.spacing+2)
+      if height is None: height = surf.get_height() + 2*(self.theme.spacing+2)
+      
+      s = pygame.Surface((width,height), pygame.SRCALPHA)
+      s.fill( self.theme.borderColor )
+      s.fill( self.theme.bgColor, s.get_rect().inflate(-2,-2))
+      s.blit( surf, (2+self.theme.spacing, 2+self.theme.spacing))
+      
+      return s
+   
+   def RenderText(self, text):
+      if len(text) == 0: return pygame.Surface((1, 1), pygame.SRCALPHA)
+      lines = text.splitlines()
+      lineSurfs = []
+      
+      for line in lines:
+         surfs = []
+         highlight = False
+         words = line.split("_")
+         for w in words:
+            if not highlight and len(w)>0:
+               surfs.append( self.theme.font.render(w, True, self.theme.textColor) )
+            elif len(w)>0:
+               surfs.append( self.theme.font.render(w, True, self.theme.highlightColor) )
+            highlight = not highlight
+            
+         width = 0
+         for s in surfs:
+            width += s.get_width()
+            
+         ls = pygame.Surface((width, surfs[0].get_height()), pygame.SRCALPHA)
+         x = 0
+         for s in surfs:
+            ls.blit( s, (x, 0) )
+            x += s.get_width()
+         
+         lineSurfs.append(ls)
+      
+      width = 0
+      height = - self.theme.spacing
+      for ls in lineSurfs:
+         if ls.get_width() > width: width = ls.get_width()
+         height += ls.get_height() + self.theme.spacing
+         
+      surf = pygame.Surface((width, height), pygame.SRCALPHA)
+      #surf.fill( self.theme.bgColor )
+      y = 0
+      for ls in lineSurfs:
+         surf.blit( ls, (0, y) )
+         y += ls.get_height() + self.theme.spacing
+         
+      return surf
+   
+class LogWidget:
+   scrollStep = 12
+   
+   def __init__(self, width=600, height=100, interface=Interface()):
+      self.interface = interface
+      self.entries = []
+      self.sprite = Sprite(width, height, z=20, offset=False)
+      self.sprite.image = self.interface.Box(self.interface.RenderText("\n".join(self.entries)), self.sprite.rect.w, self.sprite.rect.h)
+      
+      self.scrollPos = 0 # current scroll position
+      self.totalHeight = 0 # total height of all text
+      
+      self.theme = Theme()
+      self.Update()
+      
+   def ProcessEvents(self, events):
+      ignoredEvents = []
+      
+      for e in events:
+         if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+            self.Export()
+         else:
+            ignoredEvents.append(e)
+      
+      return ignoredEvents
+   
+   def Export(self):
+      filename = "combatlog.txt"
+      with open(filename, "w") as f:
+         f.write("Combat log export dd.mm.yyyy - hh:mm\r\n\r\n")
+         f.write("\r\n".join(self.entries))
+         
+      os.system("start " + filename)
+      
+   def ScrollUp(self):
+      self.scrollPos -= LogWidget.scrollStep
+      if self.scrollPos < 0: self.scrollPos = 0
+      self.Update()
+      
+   def ScrollDown(self):
+      h = self.sprite.rect.h - 2*(self.theme.spacing+2)
+      self.scrollPos += LogWidget.scrollStep
+      if self.scrollPos > self.totalHeight - h: self.scrollPos = max(0, self.totalHeight - h)
+      self.Update()
+      
+   def ScrollToBottom(self):
+      h = self.sprite.rect.h - 2*(self.theme.spacing+2)
+      self.scrollPos = max(0, self.totalHeight - h)
+      self.Update()
+      
+   def Log(self, text):
+      self.entries.append(text)
+      self.Update()
+      self.ScrollToBottom()
+   
+   def GetSprite(self):
+      return self.sprite
+   
+   def Update(self):
+      textSurf = self.interface.RenderText("\n".join(self.entries))
+      self.totalHeight = textSurf.get_rect().h
+      
+      w, h = self.sprite.rect.w - 2*(self.theme.spacing+2), self.sprite.rect.h - 2*(self.theme.spacing+2)
+      
+      croppedTextSurf = pygame.Surface((w,h), pygame.SRCALPHA)
+      croppedTextSurf.blit(textSurf, (0,0), area=croppedTextSurf.get_rect().move(0,self.scrollPos))
+      self.sprite.image = self.interface.Box(croppedTextSurf, self.sprite.rect.w, self.sprite.rect.h)
+      
+      visiblePart = [1.*self.scrollPos/self.totalHeight, min(1., 1.*(self.scrollPos+h)/self.totalHeight)]
+      scrollBarHeight = self.sprite.rect.h * (visiblePart[1] - visiblePart[0])
+      scrollBarY = self.sprite.rect.h * visiblePart[0]
+      self.sprite.image.blit( self.interface.Box(pygame.Surface((1,1), pygame.SRCALPHA), width=4, height=scrollBarHeight), (self.sprite.rect.w - 4, scrollBarY) )
+      
+class Popup:
+   speed = 70.
+   
+   def __init__(self, surf, position):
+      self.sprite = Sprite.FromSurface(surf, position)
+      self.lifetime = 1.
+      self.dead = False
+      self.offset = 0.
+      self.origY = position[1]
+      
+   def Move(self, time):
+      self.lifetime -= 1. * time / 1000.
+      if self.lifetime <= 0.:
+         self.dead = True
+         self.sprite.visible = False
+      
+      self.offset += Popup.speed * time / 1000.
+      self.sprite.rect.top = self.origY - self.offset
 
 class Screen:
    def __init__(self, width, height, caption="Untitled window"):
@@ -65,19 +324,32 @@ class EventHandler:
       return ignoredEvents
 
 class Scene(EventHandler):
-   def __init__(self):
+   def __init__(self, sizeX=1024, sizeY=768):
       EventHandler.__init__(self)
-      self.sprites = []
+      self.sprites = SpriteGroup()
       self.flags = 0
       self.nextScene = None
-      self.screenSize = (800,  600)
+      self.screenSize = (sizeX,  sizeY)
+   
+   def Align(self, sprite, alignment):
+      """ Align a sprite's position to a given position on the screen. """
+      w, h = sprite.rect.w, sprite.rect.h
       
+      if alignment & mcons.TOP:  sprite.rect.top = 0
+      elif alignment & mcons.BOTTOM: sprite.rect.bottom = self.screenSize[1]
+      elif alignment & mcons.VCENTER: sprite.rect.centery = self.screenSize[1] // 2
+      
+      if alignment & mcons.LEFT: sprite.rect.left = 0
+      elif alignment & mcons.RIGHT: sprite.rect.right = self.screenSize[0]
+      elif alignment & mcons.HCENTER: sprite.rect.centerx = self.screenSize[0] // 2
+   
    def Frame(self):
       pass
       
    def Render(self, surface):
-      for sprite in self.sprites:
-         sprite.Draw(surface)
+      self.sprites.draw(surface)
+#      for sprite in self.sprites:
+#         sprite.Draw(surface)
 #      self.eventHandler = EventHandler()
 #       
 #       self.sprites.append(Sprite(self.screenSize[0],self.screenSize[1]))
@@ -86,19 +358,121 @@ class Scene(EventHandler):
 #       self.sprites[0].image.fill(color)
 
 class Creature:
+   NoIcon = pygame.image.load(os.path.join('gfx', 'noicon.png'))
+   
    def __init__(self, sprite=None):
       self.sprites = {mcons.DEFAULT:sprite}
       self.state = mcons.DEFAULT
       
       self.pos = [0., 0.] if sprite is None else [1.*sprite.rect.centerx, 1.*sprite.rect.centery]
+      self.tile = None
+      self.path = []
       
-      self.profile = rs.RPGCreature("Alrik", 1, rs.RPGRace("Human"), rs.RPGProfession("Warrior"))
+      self.profile = rs.RPGCreature("Alrik", 1, rs.RPGRace("Human"), rs.RPGProfession("Warrior"), hp=12)
+      self.movementLeft = self.profile.movement
+      self.icon = Creature.NoIcon
+      self.initiative = 1.
+      
+   def InitRound(self):
+      self.movementLeft = self.profile.movement
       
    def GetSprite(self):
       return self.sprites[self.state] if self.state in self.sprites else self.sprites[mcons.DEFAULT]
    
-   def GetTooltip(self):
-      return Tooltip(str(self.profile))
+#   def GetTooltip(self):
+#      return Tooltip(str(self.profile))
+
+class InitiativeManager:
+   def __init__(self, width=600, interface=Interface()):
+      self.creatures = []
+      self.timelineSprite = None
+      self.dirty = True
+      self.width = width
+      
+      self.interface = interface
+      
+      self.rects = [] # contains (rect,creature) tuples with rect being a creature's icon rect in timeline
+      
+   def GetTimelineSprite(self):
+      if self.timelineSprite is not None and not self.dirty:
+         return self.timelineSprite
+      
+      hIcon = 48
+      hEff = hIcon + 2*(self.interface.theme.spacing+2)
+      
+      self.dirty = False
+      
+      if len(self.creatures) > 0:
+         minIni = self.creatures[0].initiative
+         maxIni = self.creatures[-1].initiative
+         
+         dt = maxIni-minIni
+         if dt <= 1.e-12: dt = 1. 
+      
+      effwidth = self.width - hEff
+      
+      if not self.timelineSprite:
+         self.timelineSprite = Sprite(self.width, hEff, z=20, offset=False)
+         
+      self.timelineSprite.image = MSurface((self.width, hEff), pygame.SRCALPHA)
+      
+      self.rects = []
+      for cre in reversed(self.creatures): # reverse to draw 'quicker' icons on top of slower ones.
+         x = cre.initiative / dt * effwidth
+         img = self.interface.Box(cre.icon)
+         self.timelineSprite.image.blit(img, (x,0))
+         
+         self.rects.append((img.get_rect().move(x,0),cre))
+      
+      self.dirty = False
+      return self.timelineSprite
+   
+   def HoveredCreature(self, mousepos):
+      hits = []
+      for rect, cre in self.rects:
+         if rect.collidepoint(mousepos): hits.append(cre)
+         
+      hits = sorted(hits, key=lambda cre: cre.initiative)
+      if len(hits)>0:
+         return hits[0]
+      return None
+      
+   def InsertCreature(self, creature):
+      self.dirty = True
+      
+      # insert manually to correct position, bisection is of no use here as the list
+      # can only be traversed with linear cost anyway.
+      i=0
+      inserted = False
+      for cre in self.creatures:
+         if cre.initiative > creature.initiative:    # if a creature has higher initiative
+            self.creatures.insert(i, creature)       # insert the former active creature right before it
+            break
+         i+=1
+      if not inserted: self.creatures.append(creature)
+   
+   def Next(self, dt):
+      """ Call when currently active creature has acted with a duration worth 'dt' initiative.
+        That creature is then removed from the top of the list, inserted back to it's new order
+        and time will be advanced so that the next creature in order may act.
+        This creature is then returned. """
+      self.dirty = True
+      
+      active = self.creatures.pop(0)
+      active.initiative += dt
+      
+      self.InsertCreature(active)
+      
+      # "normalize" initiative, so that the first creature has ini 0 and can act right now.
+      for cre in self.creatures:
+         cre.initiative -= self.creatures[0].initiative
+         
+      return self.creatures[0]
+         
+   def Update(self):
+      self.creatures = sorted(self.creatures, key=lambda cre:cre.initiative)
+      self.dirty = True
+      self.GetTimelineSprite()
 
 class CombatScene(Scene):
    ScrollKeys = (pygame.locals.K_UP, pygame.locals.K_DOWN, pygame.locals.K_LEFT, pygame.locals.K_RIGHT)
@@ -106,72 +480,158 @@ class CombatScene(Scene):
    def __init__(self, backgroundImg=""):
       Scene.__init__(self)
       
-      self.mapSizeX, self.mapSizeY = (21.,21.) # map size in meters/physical length unit
-      self.ppm = 64. # zoom factor / pixels per meter
-      self.tileSize = 1.5 # tile size in meters/physical length
-      self.scrollSpeed = 0.13
-      self.movementSpeed = 6.
+      # initial parameters
+      self.mapSizeX, self.mapSizeY = (21.,21.)                                # map size in meters/physical length unit
+      self.ppm = 48.                                                          # zoom factor / pixels per meter
+      self.tileSize = 1.5                                                     # tile size in meters/physical length
+      self.scrollSpeed = 0.13                                                 # scroll length per frame
+      self.movementSpeed = 6.                                                 # movement length per frame
       
-      self.cameraX, self.cameraY = (0.,0.) # top left corner of camera
+      self.cameraX, self.cameraY = (0.,0.)                                    # top left corner of initial camera
       
-      self.gridColor = (20,180,250,210)
-      self.gridBgA = (10,90,125,150)
-      self.gridBgB = (8,72,100,150)
+      self.gridColor = (20,180,250,200)                                       # grid colors
+      self.gridBgA = (12,108,150,100)                                         # checkerboard grid background color 1
+      self.gridBgB = (8,72,100,100)                                           # checkerboard grid background color 2
       
+      # initial flags
       self.scrolling = False
       self.movingCreature = False
       self.showGrid = False
-      self.showActiveTile = False
+      self.showActiveTile = True
       
+      self.tooltip = None
+      
+      
+      # child objects
+      self.interface = Interface()                                            # use default interface
+      self.logWidget = LogWidget(interface=self.interface)
+      self.iniMgr = InitiativeManager()
+      
+      self.Align(self.logWidget.GetSprite(), mcons.TOPRIGHT)
+      self.Align(self.iniMgr.GetTimelineSprite(), mcons.BOTTOMCENTER)
+      
+      self.sprites.add(self.logWidget.GetSprite())
+      self.sprites.add(self.iniMgr.GetTimelineSprite())
+      
+      
+      
+      # variables
+      self._roundNum = 0
+      
+      
+      
+      # contained lists of objects      
+      self.creatures = []
+      self.selectedCreature = None
+      self.movingCreatures = []
+      self.hlTileSprites = []
+      self.highlightedTiles = []
+      
+      srs = 0.1 # scroll rect size, percentage of screen width/height in which to scroll by mouse
+      w, h = self.screenSize
       self.scrollRects = {
-            mcons.SCROLL_UP:    pygame.Rect(0,0,800,640/10),
-            mcons.SCROLL_DOWN:  pygame.Rect(0,640-640/10,800,640/10),
-            mcons.SCROLL_LEFT:  pygame.Rect(0,0,800/10,640),
-            mcons.SCROLL_RIGHT: pygame.Rect(800-800/10,0,800/10,640)}
+            mcons.SCROLL_UP:    pygame.Rect(0,0,w,h*srs),
+            mcons.SCROLL_DOWN:  pygame.Rect(0,h*(1.-srs),w,h*srs),
+            mcons.SCROLL_LEFT:  pygame.Rect(0,0,w*srs,h),
+            mcons.SCROLL_RIGHT: pygame.Rect(w*(1.-srs),0,w*srs,h)}
       
       if mcons.DEBUG:
          self.mapArea = Sprite(self.mapSizeX*self.ppm, self.mapSizeY*self.ppm)
          self.mapArea.image.fill((40,150,150))
-         self.sprites.append(self.mapArea)
+         self.sprites.add(self.mapArea)
       
-      self.background = Sprite(self.mapSizeX*self.ppm, self.mapSizeY*self.ppm)
+      self.background = Sprite(self.mapSizeX*self.ppm, self.mapSizeY*self.ppm, z=0)
       if backgroundImg != "":
          self.background.image.blit(pygame.image.load(os.path.join("gfx",backgroundImg)).convert(), (0,0))
-      self.sprites.append(self.background)
+      self.sprites.add(self.background)
       
+      # initialize image for highlighted tiles (e.g. tiles you are able to move to)
+      tileSpacing = 0 # currently bugged if greater than 0
+      spacedSize = self.tileSize * self.ppm - (tileSpacing*2)
+      fullSize = self.tileSize * self.ppm
       
-      size = self.tileSize * self.ppm
-      self.grid = Sprite(self.mapSizeX*self.ppm, self.mapSizeY*self.ppm)
-      self.grid.visible = False
+      self.hlTileImage = pygame.Surface((self.tileSize*self.ppm, self.tileSize*self.ppm), pygame.SRCALPHA)
+      self.hlTileImage.fill(pygame.Color(12,108,150,100))
+      pygame.draw.rect(self.hlTileImage, self.gridColor, (tileSpacing, tileSpacing, spacedSize, spacedSize), 1) # tile border
+      
+      self.grid = Sprite(self.mapSizeX*self.ppm, self.mapSizeY*self.ppm, z=2)
+      self.grid.image.fill(pygame.Color(0,0,0,0))
       self.grid.image = self.grid.image.convert_alpha()
       for i in range(int(self.mapSizeX//self.tileSize)):
          for j in range(int(self.mapSizeY//self.tileSize)):
             color = self.gridBgA if (i+j%2)%2 == 0 else self.gridBgB
-            pygame.draw.rect(self.grid.image, color, (i*size, j*size, size, size)) # tile background
-            pygame.draw.rect(self.grid.image, self.gridColor, (i*size, j*size, size, size), 1) # tile border
-      self.sprites.append(self.grid)
+            pygame.draw.rect(self.grid.image, color, (i*self.tileSize*self.ppm+tileSpacing, j*self.tileSize*self.ppm+tileSpacing, spacedSize, spacedSize)) # tile background
+            pygame.draw.rect(self.grid.image, self.gridColor, (i*self.tileSize*self.ppm+tileSpacing, j*self.tileSize*self.ppm+tileSpacing, spacedSize, spacedSize), 1) # tile border
+      self.sprites.add(self.grid)
       
-      self.hoveredTileSprite = Sprite(size, size)
-      self.hoveredTileSprite.visible = False
+      self.hoveredTileSprite = Sprite(fullSize, fullSize, z=4)
       self.hoveredTileSprite.image = self.hoveredTileSprite.image.convert_alpha()
-      pygame.draw.rect(self.hoveredTileSprite.image, (0,0,0,0), (0,0,size,size))
-      pygame.draw.rect(self.hoveredTileSprite.image, (255,255,255), (0,0,size,size), 1)
-      self.sprites.append(self.hoveredTileSprite)
-      
-      self.AddCreature(Creature(Sprite.FromSurface(pygame.image.load(os.path.join("gfx","hero.png")).convert())))
+      pygame.draw.rect(self.hoveredTileSprite.image, (0,0,0,0), (0,0,self.tileSize * self.ppm,self.tileSize * self.ppm))
+      pygame.draw.rect(self.hoveredTileSprite.image, (255,255,255), (0,0,self.tileSize * self.ppm,self.tileSize * self.ppm), 1)
+      self.sprites.add(self.hoveredTileSprite)
       
       self.InitTiles()
       
-   def AddCreature(self, creature):
-      self.sprites.append(creature.GetSprite())
-      self.creature=creature
+      self.AddCreature(Creature(Sprite.FromSurface(pygame.image.load(os.path.join("gfx","hero.png")).convert())), (0,0))
+      self.creatures[0].profile.name = "Geron"
+      self.AddCreature(Creature(Sprite.FromSurface(pygame.image.load(os.path.join("gfx","hero.png")).convert())), (3,4))
+      
+      self.creatures[0].initiative = 1.
+      self.creatures[1].initiative = 0.
+      
+      #self.MoveCreatureToTile(self.creatures[1], self.tiles[0][0])
+      #self.MoveCreatureToTile(self.creatures[1], self.tiles[3][4])
+      
+      #self.SetActiveCreature(self.creatures[1])
+      self.BeginActivation(self.creatures[1])
+      
+      jabDagger = rs.RPGAttack("Jab (Dagger)", mcons.PHYSICAL, [rs.RPGDamage([D6()], bonuses = [mcons.DEXTERITY])] )
+      self.selectedCreature.profile.attacks.append(jabDagger)
+      
+   def AddCreature(self, creature, position):
+      self.creatures.append(creature)
+      self.iniMgr.InsertCreature(creature)
+      self.MoveCreatureToTile(creature, self.tiles[position[0]][position[1]], anim=False, checkDist=False)
+      
+   def AdjacentTiles(self, tile):
+      x, y = tile.x, tile.y
+      
+      adj = []
+      for pos in ((x-1,y-1), (x-1,y), (x-1,y+1), (x, y-1), (x, y+1), (x+1, y-1), (x+1, y), (x+1, y+1)):
+         if 0 <= pos[1] and pos[1] < len(self.tiles) and 0 <= pos[0] and pos[0] < len(self.tiles[pos[1]]):
+            adj.append(self.tiles[pos[0]][pos[1]])
+      return adj
+   
+   def EndActivation(self, dt=1.5):
+      #self._roundNum += 1
+      self.BeginActivation(self.iniMgr.Next(dt))
+      
+   def BeginActivation(self, creature):
+      self.logWidget.Log("It's _%s's_ turn." % creature.profile.name)
+      creature.InitRound()
+      self.SetActiveCreature(creature)
+      
+   def SetActiveCreature(self, creature):
+      self.selectedCreature = creature
+      self.iniMgr.Update()
+      self.UpdateHighlightedTiles()
       
    def Frame(self):
       dx, dy = 0., 0.
-      if self.scrollRects[mcons.SCROLL_UP].collidepoint(pygame.mouse.get_pos()): dy -= 1.
-      if self.scrollRects[mcons.SCROLL_DOWN].collidepoint(pygame.mouse.get_pos()): dy += 1.
-      if self.scrollRects[mcons.SCROLL_LEFT].collidepoint(pygame.mouse.get_pos()): dx -= 1.
-      if self.scrollRects[mcons.SCROLL_RIGHT].collidepoint(pygame.mouse.get_pos()): dx += 1.
+      
+      mouseScrolling = False
+      if self.scrollRects[mcons.SCROLL_UP].collidepoint(pygame.mouse.get_pos()):
+         dy -= 1.
+         mouseScrolling = True
+      if self.scrollRects[mcons.SCROLL_DOWN].collidepoint(pygame.mouse.get_pos()):
+         dy += 1.
+         mouseScrolling = True
+      if self.scrollRects[mcons.SCROLL_LEFT].collidepoint(pygame.mouse.get_pos()):
+         dx -= 1.
+         mouseScrolling = True
+      if self.scrollRects[mcons.SCROLL_RIGHT].collidepoint(pygame.mouse.get_pos()):
+         dx += 1.
+         mouseScrolling = True
       self.MoveCamera(self.scrollSpeed*dx, self.scrollSpeed*dy)
       
       if self.scrolling:
@@ -183,17 +643,31 @@ class CombatScene(Scene):
          self.MoveCamera(self.scrollSpeed*dx, self.scrollSpeed*dy)
       
       if self.movingCreature:
-         target = pygame.mouse.get_pos()[0]+self.cameraX*self.ppm, pygame.mouse.get_pos()[1]+self.cameraY*self.ppm
-         curpos = self.creature.pos
+         for cre in self.movingCreatures:
+            target = cre.movTarget #pygame.mouse.get_pos()[0]+self.cameraX*self.ppm, pygame.mouse.get_pos()[1]+self.cameraY*self.ppm
+            curpos = cre.pos
          
-         dx = 1. * target[0] - curpos[0]
-         dy = 1. * target[1] - curpos[1]
-         dist2 = dx**2+dy**2
-         if dist2 <= 1.: return
-         angle = math.atan2(dy, dx)
-         move_r = min( self.movementSpeed, math.sqrt(dist2) )
+            dx = 1. * target[0] - curpos[0]
+            dy = 1. * target[1] - curpos[1]
+            dist2 = dx**2+dy**2
+            if dist2 <= 1.:
+               cre.path.pop(0)
+               if len(cre.path) > 0:
+                  cre.movTarget = cre.path[0]
+               else:
+                  cre.movTarget = None
+                  self.movingCreatures.remove(cre)
+                  if cre == self.selectedCreature: self.UpdateHighlightedTiles()
+                  if len(self.movingCreatures) == 0: self.movingCreature = False
+               
+            else:
+               angle = math.atan2(dy, dx)
+               move_r = min( self.movementSpeed, math.sqrt(dist2) )
          
-         self.MoveCreature(move_r*math.cos(angle),move_r*math.sin(angle))
+               self.MoveCreature(cre, move_r*math.cos(angle),move_r*math.sin(angle))
+               
+      if self.scrolling or mouseScrolling or self.movingCreature:
+         self.UpdateTooltip()
          
       self.grid.visible = self.showGrid
       self.hoveredTileSprite.visible = (self.HoveredTile() is not None and self.showActiveTile)
@@ -218,15 +692,44 @@ class CombatScene(Scene):
       self.cameraX = min( max( self.cameraX+dx, -1 ), self.mapSizeX + 1 -self.screenSize[0]/self.ppm )
       self.cameraY = min( max( self.cameraY+dy, -1 ), self.mapSizeY + 1 -self.screenSize[1]/self.ppm )
       
-   def MoveCreature(self, dx, dy):
-      self.creature.pos[0] += dx
-      self.creature.pos[1] += dy
+   def MoveCreature(self, creature, dx, dy):
+      creature.pos[0] += dx
+      creature.pos[1] += dy
       
-      self.creature.GetSprite().rect.center = (self.creature.pos[0],self.creature.pos[1]) 
+      creature.GetSprite().rect.center = (creature.pos[0],creature.pos[1])
+      
+   def MoveCreatureToTile(self, creature, tile, anim=False, checkDist=False):
+      if not creature.tile:
+         dist = 0
+      else:
+         dist = max(abs(creature.tile.x - tile.x), abs(creature.tile.y - tile.y))
+         if checkDist and dist > creature.movementLeft: return
+      
+      creature.tile = tile
+      creature.movementLeft = max( creature.movementLeft - dist, 0 )
+      
+      # if already moving, just change the target and continue animation
+      if creature in self.movingCreatures:
+         creature.movTarget = tile.rect.center
+         creature.path[0] = tile.rect.center
+      
+      # otherwise, issue new movement if animation is desired, else just set new position      
+      else:
+         if anim:
+            creature.movTarget = tile.rect.center
+            creature.path.insert(0,tile.rect.center)
+            self.movingCreatures.append(creature)
+            self.movingCreature = True
+         else:
+            creature.GetSprite().rect.center = tile.rect.center
+            creature.pos = [tile.rect.centerx, tile.rect.centery]
+      
+      self.UpdateHighlightedTiles()
       
    def ProcessEvents(self):
       events = EventHandler.ProcessEvents(self)
       mousepos = pygame.mouse.get_pos()[0]+self.cameraX*self.ppm, pygame.mouse.get_pos()[1]+self.cameraY*self.ppm
+      hoveredTile = self.HoveredTile()
       
       for e in events:
          if e.type == pygame.locals.KEYDOWN:
@@ -238,6 +741,9 @@ class CombatScene(Scene):
             
             elif e.key == pygame.locals.K_h:
                self.showActiveTile = not self.showActiveTile
+               
+            elif e.key == pygame.locals.K_RETURN:
+               self.EndActivation()
                
          elif e.type == pygame.locals.KEYUP:
             if e.key in CombatScene.ScrollKeys:
@@ -254,29 +760,114 @@ class CombatScene(Scene):
             if e.buttons[1]:
                self.MoveCamera(-e.rel[0]/self.ppm, -e.rel[1]/self.ppm)
             
-            if self.HoveredTile():
-               self.hoveredTileSprite.rect = self.HoveredTile().rect
+            if hoveredTile:
+               self.hoveredTileSprite.rect = hoveredTile.rect
                
-#             if self.creature.GetSprite().rect.collidepoint(mousepos):
-#                self.sprites.append(self.creature.GetTooltip())
+            self.UpdateTooltip()
+                  
                
          elif e.type == pygame.MOUSEBUTTONDOWN:
+            if self.logWidget.sprite.rect.collidepoint(pygame.mouse.get_pos()):
+               ignoredEvents = self.logWidget.ProcessEvents([e]) 
+               if e not in ignoredEvents: continue 
+            
             if e.button == 1:
-               self.movingCreature=True
-#             elif e.button == 4:
-#                self.Zoom(1)
-#             elif e.button == 5:
-#                self.Zoom(-1)
+               if hoveredTile:
+                  # check if a different creature is hovered
+                  hoveredCreature = None
+                  for cre in self.creatures:
+                     if cre.GetSprite().rect.collidepoint(mousepos):
+                        hoveredCreature = cre
+                        break
+                  
+                  if hoveredCreature and hoveredCreature != self.selectedCreature: # attack
+                     o = self.selectedCreature.profile.UseAttack(self.selectedCreature.profile.attacks[0], hoveredCreature.profile)
+                     for s in o: self.logWidget.Log(s)
+                  else: # move
+                     self.MoveCreatureToTile(self.selectedCreature, hoveredTile, anim=True, checkDist=True)
+            elif e.button == 4:
+               self.logWidget.ScrollUp()
+            elif e.button == 5:
+               self.logWidget.ScrollDown()
                
          elif e.type == pygame.MOUSEBUTTONUP:
-            if e.button == 1:
-               self.movingCreature=False
+            pass
+            #if e.button == 1:
+            #   self.movingCreature=False
       
    def Render(self, surface):
-      surface.fill((0,0,0)) # draw black background because screen might be larger than combat area
-      for sprite in self.sprites:
+      surface.fill((0,0,0)) # draw black background because the screen might be larger than the combat area
+       
+      self.sprites.draw(surface, (-self.cameraX*self.ppm, -self.cameraY*self.ppm))
+       
+       #for sprite in self.sprites:
          #if sprite.visible: surface.blit(sprite.image, sprite.rect.move(-self.cameraX*self.ppm, -self.cameraY*self.ppm))
-         sprite.Draw(surface, sprite.rect.move(-self.cameraX*self.ppm, -self.cameraY*self.ppm))
+         #sprite.Draw(surface, sprite.rect.move(-self.cameraX*self.ppm, -self.cameraY*self.ppm))
+
+      #for tile in self.highlightedTiles:
+      #   surface.fill((12,108,150,100), tile.rect.move(-self.cameraX*self.ppm, -self.cameraY*self.ppm))
+         
+      for creature in self.creatures:
+         spr = creature.GetSprite() 
+         spr.Draw(surface, spr.rect.move(-self.cameraX*self.ppm, -self.cameraY*self.ppm))
+         
+      if self.tooltip:
+         self.tooltip.rect.bottomleft = pygame.mouse.get_pos() 
+         self.tooltip.Draw(surface)
+         
+      #self.iniMgr.Update()
+      #self.iniMgr.GetTimelineSprite().Draw(surface)
+         
+      #self.logWidget.GetSprite().Draw(surface)
+         
+   def UpdateTooltip(self):
+      mousepos = pygame.mouse.get_pos()[0]+self.cameraX*self.ppm, pygame.mouse.get_pos()[1]+self.cameraY*self.ppm
+      
+      self.tooltip = None
+      
+      # check if a creature is hovered
+      for creature in self.creatures:
+         if creature.GetSprite().rect.collidepoint(mousepos):
+            self.tooltip = self.interface.CreatureTooltip(creature, showHp=True)
+            return
+         
+      # check if a creature icon in iniMgr timeline is hovered
+      if self.iniMgr.GetTimelineSprite().rect.collidepoint(pygame.mouse.get_pos()):
+         #print self.iniMgr.GetTimelineSprite().rect
+         innerMousePos = pygame.mouse.get_pos()[0] - self.iniMgr.GetTimelineSprite().rect.left, \
+                         pygame.mouse.get_pos()[1] - self.iniMgr.GetTimelineSprite().rect.top
+         
+         #print innerMousePos
+         hov = self.iniMgr.HoveredCreature(innerMousePos)
+         if hov is not None:
+            self.tooltip = self.interface.CreatureTooltip(hov, showHp=True)
+         
+         
+   def UpdateHighlightedTiles(self):
+      [self.sprites.remove(s) for s in self.hlTileSprites]
+      self.hlTileSprites = []
+      self.highlightedTiles = []
+      
+      if not self.selectedCreature \
+         or self.selectedCreature.tile is None \
+         or self.selectedCreature in self.movingCreatures \
+         or self.selectedCreature.movementLeft == 0: return
+      
+      hlset = set()
+      hlset.add(self.selectedCreature.tile)
+      for i in range(self.selectedCreature.movementLeft):
+         newhlset = hlset.copy()
+         for tile in hlset:
+            [newhlset.add(t) for t in self.AdjacentTiles(tile)]
+         hlset = newhlset
+         
+      for tile in hlset:
+         self.highlightedTiles.append(tile)
+         spr = Sprite.FromSurface(self.hlTileImage, tile.rect.topleft)
+         spr.z = 1
+         self.hlTileSprites.append(spr)
+         self.sprites.add(spr)
+      
          
 class MenuScene(Scene):
    def __init__(self):
@@ -301,26 +892,26 @@ class MenuScene(Scene):
       
       self.background = Sprite(self.screenSize[0],self.screenSize[1])
       self.background.image.fill(self.backgroundColor)
-      self.sprites.append(self.background)
+      self.sprites.add(self.background)
 
    def AddItem(self, item, x=-1, y=-1):
       """ Adds a sprite as a menu item and tries to position it automatically, by placing it beneath the
          last item. Positionig can be manually overwritten."""
-      if y<0 and len(self.menuItems) > 0:
+      if y < 0 and len(self.menuItems) > 0:
          iy = self.menuItems[-1].rect.bottom + self.itemSpacing
-      elif y<0:
+      elif y < 0:
          iy = 3*self.itemSpacing
       else: #manual placement
          iy = y
       
-      if x<0 and len(self.menuItems) > 0:
+      if x < 0 and len(self.menuItems) > 0:
          if self.itemAlignment & mcons.LEFT:
             ix = self.menuItems[-1].rect.left
          elif self.itemAlignment & mcons.RIGHT:
             ix = self.menuItems[-1].rect.right - item.rect.width
          elif self.itemAlignment & mcons.HCENTER:
             ix = self.menuItems[-1].rect.centerx - math.floor(0.5*item.rect.width)
-      elif x<0:
+      elif x < 0:
          if self.itemAlignment & mcons.LEFT:
             ix = 5*self.itemSpacing
          elif self.itemAlignment & mcons.RIGHT:
@@ -333,7 +924,7 @@ class MenuScene(Scene):
       item.rect.topleft = (ix, iy)
       
       self.menuItems.append(item)
-      self.sprites.append(item)
+      self.sprites.add(item)
       
       if self.autoSelect and self.selectedItem < 0:
          self.selectedItem = 0
@@ -425,7 +1016,7 @@ class MenuScene(Scene):
             
 class Renderer:
    def __init__(self):
-      self.screen = Screen(800, 600, "testWindow")
+      self.screen = Screen(1024, 768, "testWindow")
       self.clock = pygame.time.Clock()
       
       self.fps = 60
@@ -436,39 +1027,87 @@ class Renderer:
    def TickFpsClock(self):
       self.clock.tick(self.fps)
             
-class Sprite(pygame.sprite.Sprite):
-   def __init__(self, width, height):
-      pygame.sprite.Sprite.__init__(self)
+class Sprite(pygame.sprite.DirtySprite):
+   def __init__(self, width, height, z=0, offset=True, flags=0):
+      pygame.sprite.DirtySprite.__init__(self)
       
-      self.image = MSurface((width, height))
+      self.image = MSurface((width, height), flags)
       self.rect = self.image.get_rect()
-      self.visible = True
+      self.visible = 1
+      self.z = z
+      self.offset = offset
       
    def Draw(self, surf, rect=None):
       if self.visible: surf.blit(self.image, self.rect if rect is None else rect)
       
    @staticmethod
-   def FromSurface(surf):
+   def FromSurface(surf, position=None):
       spr = Sprite(0,0)
       spr.image = surf
       spr.rect = spr.image.get_rect()
+      if position: spr.rect.topleft = position
       return spr
-
-class Tooltip(Sprite):
-   def __init__(self, text="NO_TEXT"):
-      font = pygame.font.Font(pygame.font.get_default_font(), 14)
-      textColor = (230,230,230,240) 
-      borderColor = (230,230,40,220)
-      background = (0,0,0,180)
-      border = 1
+   
+class SpriteGroup(pygame.sprite.Group):
+   """ Subclass of a pygame sprite Group, providing additional functionality.
+      Add only 'rpg' Sprites to this group, no pure pygame Sprites, as a Draw() method is required.
+       
+      - sprites contained in this group may have a z-value, where sprites with
+        higher z-values will be drawed on top of lower ones. Sprites with the same
+        z-value may be painted in arbitrary order.
+        
+      - the whole sprite group may be given an offset when drawing, moving all sprite rects by the
+        given offset. """
+   def __init__(self, *sprites):
+      pygame.sprite.Group.__init__(self)
       
-      textSurf = font.render(text, 1, textColor)
+      self.zMap = {}       # map containing { 'z': sg } entries where z is a z-coordinate and s1, s2 are all sprites
+                           # in this group with that z-coordinate.
+      self.zValues = []    # list of all z-coordinates in this group. keep this sorted, as it determines drawing order
       
-      Sprite.__init__(self, textSurf.get_rect().width + border + 2, textSurf.get_rect().height + border + 2)
-      self.image.fill(background)
-      pygame.draw.rect(self.image, borderColor, self.image.get_rect().inflate(-2,-2), border)
-      self.image.blitAligned(textSurf, mcons.CENTER)
-      self.image = self.image.convert_alpha()
+      self.add(*sprites)
+         
+   def add(self, *sprites):
+      pygame.sprite.Group.add(self, *sprites)
+      
+      for s in sprites:
+         if s.z in self.zValues: self.zMap[s.z].append(s)
+         else:
+            self.zMap[s.z] = [s]
+            self.zValues.append(s.z)
+            self.zValues = sorted(self.zValues)
+         
+   def draw(self, surf, offset=(0,0)):
+      for z in self.zValues:
+         for spr in self.zMap[z]:
+            if spr.offset: spr.Draw(surf, spr.rect.move(offset[0],offset[1]))
+            else: spr.Draw(surf)
+            
+   def remove(self, *sprites):
+      pygame.sprite.Group.remove(self, *sprites)
+      
+      for spr in sprites:
+         self.zMap[spr.z].remove(spr)
+         if len(self.zMap[spr.z]) == 0:
+            del self.zMap[spr.z]
+            self.zValues.remove(spr.z)
+      
+# 
+# class Tooltip(Sprite):
+#    def __init__(self, text="NO_TEXT"):
+#       font = pygame.font.Font(pygame.font.get_default_font(), 14)
+#       textColor = (230,230,230,240) 
+#       borderColor = (230,230,40,220)
+#       background = (0,0,0,180)
+#       border = 1
+#       
+#       textSurf = font.render(text, 1, textColor)
+#       
+#       Sprite.__init__(self, textSurf.get_rect().width + border + 2, textSurf.get_rect().height + border + 2)
+#       self.image.fill(background)
+#       pygame.draw.rect(self.image, borderColor, self.image.get_rect().inflate(-2,-2), border)
+#       self.image.blitAligned(textSurf, mcons.CENTER)
+#       self.image = self.image.convert_alpha()
       
 class Tile:
    def __init__(self, x, y, size):
@@ -527,7 +1166,7 @@ class TitleScreen(Scene):
       sceneSpr.image.blitAligned(logoSpr.image, mcons.CENTER)
       sceneSpr.image.blitAligned(font.render("myrpg", 1, (230,220,0)), mcons.CENTER)
        
-      self.sprites.append(sceneSpr)
+      self.sprites.add(sceneSpr)
       
    def ProcessEvents(self):
       events = EventHandler.ProcessEvents(self)
@@ -548,13 +1187,13 @@ class MainMenu(MenuScene):
       sceneSpr = Sprite(self.screenSize[0], self.screenSize[1])
       sceneSpr.image.blitAligned(font.render("Main Menu", 1, (230,220,0)), mcons.TOPLEFT, 20)
       
-      self.sprites.append(sceneSpr)
+      self.sprites.add(sceneSpr)
       
       for itm in ("Start game", "Quit"):
          spr = MenuItem.FromSurface(font2.render(itm, 1, (230,230,230)))
          self.AddItem(spr)
          
-      self.sprites.append(self.selector)
+      self.sprites.add(self.selector)
       
    def ItemTriggered(self, itm):
       if itm == len(self.menuItems)-1: # Quit
@@ -684,7 +1323,7 @@ class TextEncounter(MenuScene):
          lineSurf = self.textFont.render(line, 1, self.textColor)
          lineSpr = Sprite.FromSurface(lineSurf)
          lineSpr.rect.topleft = (rect.x,rect.y+y_offset)
-         self.sprites.append(lineSpr)
+         self.sprites.add(lineSpr)
          y_offset += lineSurf.get_rect().h + self.lineSpacing
          
       return y_offset
